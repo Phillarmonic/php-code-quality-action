@@ -1,0 +1,105 @@
+name: "PHP Composite Quality Checks"
+description: "A composite action that sets up PHP and runs a suite of quality tools (PHPStan, PHPCS, Psalm, PHPMD) with Reviewdog for inline PR comments."
+
+# Define the inputs that users of this action can provide to customize its behavior.
+inputs:
+  php-version:
+    description: "The PHP version to use (e.g., '8.3', '8.2')."
+    required: false
+    default: "8.3"
+  thread-safe:
+    description: "Set to 'true' to install the Thread Safe (TS) version of PHP. Defaults to 'false' (NTS)."
+    required: false
+    default: "false"
+  php-extensions:
+    description: "Comma-separated list of PHP extensions to install (e.g., 'mbstring, dom, intl')."
+    required: false
+    default: "mbstring, dom, xml, intl"
+  composer-options:
+    description: "Additional flags to pass to the 'composer install' command."
+    required: false
+    default: "--prefer-dist --no-progress --no-suggest"
+  path-to-check:
+    description: "The directory path to run the analysis on (e.g., 'src/', 'app/')."
+    required: false
+    default: "src/"
+  phpstan-config:
+    description: "Path to the PHPStan configuration file (e.g., 'phpstan.neon')."
+    required: false
+    default: "phpstan.neon"
+  phpcs-standard:
+    description: "The ruleset for PHPCS (e.g., 'PSR12', path to '.phpcs.xml' file)."
+    required: false
+    default: "PSR12"
+  phpmd-ruleset:
+    description: "Path to the PHPMD ruleset file (e.g., 'phpmd.xml')."
+    required: false
+    default: "phpmd.xml"
+  github-token:
+    description: "The GITHUB_TOKEN secret, required for posting PR comments."
+    required: true
+    default: "${{ github.token }}"
+
+# Define the sequence of steps the action will run.
+runs:
+  using: "composite"
+  steps:
+    # 1. Setup PHP environment using shivammathur/setup-php
+    - name: Setup PHP
+      uses: shivammathur/setup-php@v2
+      with:
+        php-version: ${{ inputs.php-version }}
+        ts: ${{ inputs.thread-safe }}
+        extensions: ${{ inputs.php-extensions }}
+        tools: composer:v2, reviewdog:latest
+        coverage: none
+
+    # 2. Cache Composer dependencies for faster subsequent runs
+    - name: Cache Composer dependencies
+      uses: actions/cache@v4
+      with:
+        path: vendor
+        key: ${{ runner.os }}-php-${{ inputs.php-version }}-${{ hashFiles('**/composer.lock') }}
+        restore-keys: |
+          ${{ runner.os }}-php-${{ inputs.php-version }}-
+
+    # 3. Install project dependencies using Composer
+    - name: Install Composer dependencies
+      shell: bash
+      run: composer install ${{ inputs.composer-options }}
+
+    # 4. Run PHPStan and pipe output to reviewdog
+    - name: Run PHPStan
+      shell: bash
+      run: |
+        ./vendor/bin/phpstan analyse ${{ inputs.path-to-check }} --error-format=checkstyle --configuration=${{ inputs.phpstan-config }} \
+          | reviewdog -f=checkstyle -name="PHPStan" -reporter="github-pr-review" -level="error"
+      env:
+        GITHUB_TOKEN: ${{ inputs.github-token }}
+
+    # 5. Run PHP CodeSniffer (PHPCS) and pipe output to reviewdog
+    - name: Run PHP CodeSniffer (PHPCS)
+      shell: bash
+      run: |
+        ./vendor/bin/phpcs --report=checkstyle --standard=${{ inputs.phpcs-standard }} ${{ inputs.path-to-check }} \
+          | reviewdog -f=checkstyle -name="PHPCS" -reporter="github-pr-review" -level="error"
+      env:
+        GITHUB_TOKEN: ${{ inputs.github-token }}
+
+    # 6. Run Psalm and pipe output to reviewdog
+    - name: Run Psalm
+      shell: bash
+      run: |
+        ./vendor/bin/psalm --output-format=checkstyle \
+          | reviewdog -f=checkstyle -name="Psalm" -reporter="github-pr-review" -level="error"
+      env:
+        GITHUB_TOKEN: ${{ inputs.github-token }}
+
+    # 7. Run PHP Mess Detector (PHPMD) and pipe output to reviewdog
+    - name: Run PHP Mess Detector (PHPMD)
+      shell: bash
+      run: |
+        ./vendor/bin/phpmd ${{ inputs.path-to-check }} xml ${{ inputs.phpmd-ruleset }} \
+          | reviewdog -f=phpmd -name="PHPMD" -reporter="github-pr-review" -level="warning"
+      env:
+        GITHUB_TOKEN: ${{ inputs.github-token }}
